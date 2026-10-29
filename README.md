@@ -139,7 +139,7 @@ Supports a wide range of LifeSmart devices, including but not limited to:
 | Category | Devices |
 |----------|---------|
 | **Switches** | SL_MC_ND1/2/3, SL_NATURE, SL_SW_IF1/2/3, SL_SW_ND1/2/3, SL_SW_NS1/2/3, and more |
-| **Locks** | SL_LK_LS, SL_LK_GTM, SL_LK_AG, SL_LK_SG, SL_LK_YL, SL_P_BDLK, OD_JIUWANLI_LOCK1 |
+| **Locks** | SL_LK_LS, SL_LK_GTM, SL_LK_AG, SL_LK_SG, SL_LK_YL, SL_LK_TY (C100), SL_LK_DJ (C200/C210), SL_P_BDLK, OD_JIUWANLI_LOCK1 |
 | **Controllers** | SL_P, SL_JEMA |
 | **Sockets/Plugs** | SL_OE_DE, SL_OE_3C, SL_OL_W, SL_OL_UK, SL_OL_UL, OD_WE_OT1 |
 | **Curtain Motors** | SL_SW_WIN, SL_CN_IF, SL_CN_FE, SL_DOOYA, SL_P_V2 |
@@ -149,6 +149,36 @@ Supports a wide range of LifeSmart devices, including but not limited to:
 | **Cameras** | LSCAM:LSICAMGOS1, LSCAM:LSICAMEZ2 |
 
 For the full list, see [const.py](https://github.com/MapleEve/lifesmart-for-homeassistant/blob/main/custom_components/lifesmart/const.py).
+
+### Door locks
+
+Each lock gets a `lock` entity alongside its existing battery and alarm sensors:
+
+- **State** comes from the lock's real-time `EVTLO` reports.
+- **Unlock** runs the hub automation (AI) linked to the lock's `P1` IO. This is the automation
+  the LifeSmart app creates for remote unlocking. The linked AI id is shown in the
+  `unlock_automation` attribute. Locks without one raise an error on unlock.
+- **Lock** isn't supported. These locks relock themselves, and LifeSmart has no remote lock command.
+- Extra binary sensors: **Doorbell** (`EVTBELL`, on for 5 s per ring), and **Duress**, **Tamper**
+  and **Intrusion** alarms (bits 1, 2 and 8 of `ALM`).
+
+Tested with a C200 (`SL_LK_DJ`) in **Local** mode. In Cloud mode, LifeSmart may hide locks from
+developer apps that lack lock permission (`EpGetAll` only returns devices authorized for the app).
+
+For Apple Home, expose the lock through HomeKit Bridge in accessory mode, and link the doorbell:
+
+```yaml
+homekit:
+  - name: Front Door Lock
+    mode: accessory
+    filter:
+      include_entities: [lock.front_door]
+    entity_config:
+      lock.front_door:
+        linked_doorbell_sensor: binary_sensor.front_door_doorbell
+```
+
+User, fingerprint and code management aren't available. LifeSmart exposes no API for them.
 
 ---
 

@@ -81,6 +81,14 @@ async def async_setup_entry(
                 )
             )
 
+        if device.get("devtype") in LOCK_TYPES:
+            data = device.get(DEVICE_DATA_KEY, {})
+            binary_sensors.extend(
+                LifeSmartLockEventSensor(device, hub.get_client(), *spec)
+                for spec in LOCK_EVENT_SENSORS
+                if spec[0] in data
+            )
+
     async_add_entities(binary_sensors)
 
 
@@ -404,3 +412,88 @@ class LifeSmartBinarySensor(LifeSmartEntity, BinarySensorEntity):
             _LOGGER.error(
                 "Error during global refresh for %s: %s", self._attr_unique_id, e
             )
+
+
+# 门锁派生传感器: (源IO, 后缀, 名称, 设备类别, 是否触发)
+# EVTBELL: type%2==1 表示有门铃消息; ALM 按位: bit1 劫持, bit2 防撬, bit8 入侵
+LOCK_EVENT_SENSORS = (
+    ("EVTBELL", "doorbell", "Doorbell", None, lambda d: d.get("type", 0) & 0x01 == 1),
+    ("ALM", "duress", "Duress Alarm", BinarySensorDeviceClass.OPENING, lambda d: bool(d.get("val", 0) & 1 << 1)),
+    ("ALM", "tamper", "Tamper Alarm", BinarySensorDeviceClass.OPENING, lambda d: bool(d.get("val", 0) & 1 << 2)),
+    ("ALM", "intrusion", "Intrusion Alarm", BinarySensorDeviceClass.OPENING, lambda d: bool(d.get("val", 0) & 1 << 8)),
+)
+# 门铃只上报按下，不上报松开；短暂置位后自动复位，以便 HomeKit 识别每次按铃
+DOORBELL_PULSE_SECONDS = 5
+
+
+class LifeSmartLockEventSensor(LifeSmartEntity, BinarySensorEntity):
+    """Doorbell or single alarm bit derived from a lock IO."""
+
+    _attr_has_entity_name = False
+
+    def __init__(self, raw_device, client, source_key, suffix, name, device_class, triggered):
+        """Initialize the lock event sensor."""
+        super().__init__(raw_device, client)
+        self._source_key = source_key
+        self._triggered = triggered
+        self._pulse = source_key == "EVTBELL"
+        self._unsub_reset = None
+        # 订阅源 IO 的更新信号，但使用自己的 unique_id
+        self._source_signal = (
+            f"{LIFESMART_SIGNAL_UPDATE_ENTITY}_"
+            f"{generate_unique_id(self.devtype, self.agt, self.me, source_key)}"
+        )
+        self._attr_unique_id = generate_unique_id(
+            self.devtype, self.agt, self.me, f"{source_key}_{suffix}"
+        )
+        self._attr_name = f"{self._name} {name}"
+        self._attr_device_class = device_class
+        source = raw_device.get(DEVICE_DATA_KEY, {}).get(source_key, {})
+        self._attr_is_on = False if self._pulse else triggered(source)
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information to link the entity to a single device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.agt, self.me)},
+            name=self._device_name,
+            manufacturer=MANUFACTURER,
+            model=self.devtype,
+            sw_version=str(self._raw_device.get(DEVICE_VERSION_KEY, "unknown")),
+            via_device=(DOMAIN, self.agt),
+        )
+
+    async def async_added_to_hass(self) -> None:
+        """Listen to the source IO's real-time updates."""
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, self._source_signal, self._handle_update)
+        )
+        self.async_on_remove(self._cancel_reset)
+
+    @callback
+    def _cancel_reset(self) -> None:
+        if self._unsub_reset:
+            self._unsub_reset()
+            self._unsub_reset = None
+
+    @callback
+    def _handle_update(self, data: dict) -> None:
+        """Handle a real-time update of the source IO."""
+        if not data:
+            return
+        triggered = self._triggered(data)
+        if self._pulse:
+            if not triggered:
+                return
+            self._cancel_reset()
+            self._unsub_reset = async_call_later(
+                self.hass, DOORBELL_PULSE_SECONDS, self._reset_pulse
+            )
+        self._attr_is_on = triggered
+        self.async_write_ha_state()
+
+    @callback
+    def _reset_pulse(self, _now) -> None:
+        self._unsub_reset = None
+        self._attr_is_on = False
+        self.async_write_ha_state()

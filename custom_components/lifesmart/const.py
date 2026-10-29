@@ -524,6 +524,7 @@ SUPPORTED_PLATFORMS = {
     Platform.LIGHT,
     Platform.CLIMATE,
     Platform.REMOTE,
+    Platform.LOCK,
     # Platform.CAMERA, # 摄像头平台当前未实现
 }
 
