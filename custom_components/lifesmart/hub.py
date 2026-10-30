@@ -235,8 +235,10 @@ class LifeSmartHub:
             )
 
             # 创建连接任务
-            self._local_task = self.hass.async_create_task(
-                self.client.async_connect(self._local_update_callback)
+            # 后台任务：永不结束的连接循环不能阻塞 HA 启动完成
+            self._local_task = self.hass.async_create_background_task(
+                self.client.async_connect(self._local_update_callback),
+                "lifesmart_local_connect",
             )
 
             # 获取设备列表

@@ -10,6 +10,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_call_later
 
 from .const import (
     DOMAIN,
@@ -30,6 +31,8 @@ _LOGGER = logging.getLogger(__name__)
 STATE_KEY = "EVTLO"
 # P1 的 valtag 指向中枢上执行开锁的 AI，例如 "/ai/<agt>/me/ai/AI1768483799"
 UNLOCK_AI_KEY = "P1"
+# 门锁通常 ~3 秒内上报开锁；超时未上报则放弃 "unlocking"，避免 HomeKit 卡住
+UNLOCK_TIMEOUT_SECONDS = 15
 
 
 async def async_setup_entry(
@@ -89,6 +92,7 @@ class LifeSmartLock(LifeSmartEntity, LockEntity):
             "unlock_automation": self._unlock_ai,
         }
         self._attr_is_locked = _is_locked(data.get(STATE_KEY, {}))
+        self._cancel_unlock_timeout = None
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -118,11 +122,30 @@ class LifeSmartLock(LifeSmartEntity, LockEntity):
                 self._handle_global_refresh,
             )
         )
+        self.async_on_remove(self._clear_unlock_timeout)
+
+    @callback
+    def _clear_unlock_timeout(self) -> None:
+        if self._cancel_unlock_timeout:
+            self._cancel_unlock_timeout()
+            self._cancel_unlock_timeout = None
+
+    @callback
+    def _unlock_timed_out(self, _now) -> None:
+        self._cancel_unlock_timeout = None
+        _LOGGER.warning(
+            "%s did not report opening within %ss of unlock",
+            self._name,
+            UNLOCK_TIMEOUT_SECONDS,
+        )
+        self._attr_is_unlocking = False
+        self.async_write_ha_state()
 
     @callback
     def _handle_update(self, new_data: dict) -> None:
         """Handle real-time EVTLO updates."""
         if new_data:
+            self._clear_unlock_timeout()
             self._attr_is_unlocking = False
             self._attr_is_locked = _is_locked(new_data)
             self.async_write_ha_state()
@@ -148,6 +171,10 @@ class LifeSmartLock(LifeSmartEntity, LockEntity):
         # 实际状态以门锁上报的 EVTLO 为准
         self._attr_is_unlocking = True
         self.async_write_ha_state()
+        self._clear_unlock_timeout()
+        self._cancel_unlock_timeout = async_call_later(
+            self.hass, UNLOCK_TIMEOUT_SECONDS, self._unlock_timed_out
+        )
 
     async def async_lock(self, **kwargs: Any) -> None:
         """The C200 relocks itself; there is no remote lock command."""
